@@ -340,9 +340,10 @@ def download_twitch_vod_and_chat(vod, delete_mp3_after_processing=False):
         shutil.move(mp3_filename, mp3_dest_path)
         print(f"Moved MP3 file to: {mp3_dest_path}")
 
-        transcription_thread = run_transcription_in_thread(mp3_dest_path, vod_folder)
-        print(f"Processing for {title} is complete. Transcription is running in the background.")
-        return transcription_thread
+        #transcription_thread = run_transcription_in_thread(mp3_dest_path, vod_folder)
+        print(f"Starting transcription for {title}.")
+        path1, path2 = transcribe(mp3_dest_path, "cuda", vod_folder)
+        return path1, path2
     except Exception as e:
         print(f"An error occurred while processing VOD {title}: {e}")
         return False
@@ -641,8 +642,8 @@ def download_twitch_vod_and_chat(vod, delete_mp3_after_processing=False):
     mp3_filename = f"{vod_id}.mp3"
     info_filename = os.path.join(vod_folder, f"{vod_id}_info.txt")
 
-    # Check if transcription files already exist
-    if os.path.exists(info_filename):
+    # Check if processed files already exist
+    if os.path.exists(mp3_filename):
         print(f"Info file for VOD {title} already exists. Skipping this VOD.")
         return False
 
@@ -699,7 +700,7 @@ def download_twitch_vod_and_chat(vod, delete_mp3_after_processing=False):
 
         # Transcribe the MP3 file from its new location
         print(f"Transcribing MP3 for {title} from {mp3_dest_path}...")
-        transcription_formatted, transcription_raw = transcribe(mp3_dest_path, "cuda", output_dir=vod_folder)
+        tpath1, tpath2 = transcribe(mp3_dest_path, "cuda", output_dir=vod_folder)
 
         print(f"Successfully processed VOD: {title}")
         return True
@@ -769,7 +770,6 @@ def move_transcription_files(source_dir, filenames, destination_dir):
 
 # Main script
 if __name__ == "__main__":
-    transcription_threads = []
 
     print("Fetching VTuber pages from Fandom categories...")
     twitch_category_pages = get_category_pages("https://virtualyoutuber.fandom.com/wiki/Category:Twitch")
