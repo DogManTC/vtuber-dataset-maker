@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flask Live Update</title>
+    <script>
+        async function fetchText() {
+            try {
+                const response = await fetch('/get_text');
+                const data = await response.json();
+                document.getElementById('text').innerText = data.text;
+            } catch (error) {
+                console.error("Error fetching text:", error);
+            }
+        }
+
+        // Poll the backend every 100ms for updates
+        setInterval(fetchText, 100);
+    </script>
+</head>
+<body>
+<h1 id="text">Loading...</h1>
+</body>
+</html>

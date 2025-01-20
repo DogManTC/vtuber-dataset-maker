@@ -9,9 +9,10 @@ import json
 import re
 import time
 import ctypes
-from threading import Thread
 from faster_whisper import WhisperModel
 from dotenv import load_dotenv
+import threading
+from time import time, sleep
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -32,6 +33,79 @@ BASE_TRANSCRIPTS_FOLDER = os.path.join(SCRIPT_DIR, "transcripts")  # Folder name
 VTUBERS_CSV = os.path.join(BASE_TRANSCRIPTS_FOLDER, "verified_vtubers.csv")
 VODS_CSV = os.path.join(BASE_TRANSCRIPTS_FOLDER, "valid_vods.csv")
 
+# Shared elapsed time variable and timer control
+elapsed_time = 0.0
+timer_running = True
+
+# Timer thread
+def timer_thread():
+    """Timer thread to track elapsed time."""
+    global elapsed_time, timer_running
+    start_time = time()
+    while timer_running:
+        elapsed_time = time() - start_time
+        sleep(0.1)  # Update every 100ms
+
+# Start the timer thread
+timer = threading.Thread(target=timer_thread, daemon=True)
+timer.start()
+
+def update_website_with_progress(vod_id):
+    """
+    Updates the website with transcription progress via a JSON payload.
+
+    Args:
+        vod_id (str): The ID of the VOD being processed.
+    """
+    try:
+        # Find the VOD in the list
+        vod_index = next((i for i, vod in enumerate(all_vods) if vod['url'].split("/videos/")[1] == vod_id), None)
+        if vod_index is None:
+            print(f"VOD ID {vod_id} not found in the list of VODs.")
+            return
+
+        vod = all_vods[vod_index]
+        vod_num_in_list = vod_index + 1
+        vods_left = len(all_vods) - vod_num_in_list
+        vod_duration_seconds = vod['duration_seconds']
+        total_audio_left_seconds = sum(v['duration_seconds'] for v in all_vods[vod_num_in_list:])
+
+        # Prepare the JSON payload
+        update_payload = {
+            "vod_id": vod_id,
+            "vod_num_in_list": vod_num_in_list,
+            "vods_left_to_process": vods_left,
+            "vod_duration": format_duration(vod_duration_seconds),
+            "total_audio_left": format_duration(total_audio_left_seconds),
+        }
+
+        print(f"Sending progress update to the website for VOD {vod_id}...")
+        # Use curl to send the update
+        curl_command = [
+            "curl", "-X", "POST", "http://localhost:7696/update_text",
+            "-H", "Content-Type: application/json",
+            "-d", json.dumps({"text": json.dumps(update_payload)})
+        ]
+        result = subprocess.run(curl_command, capture_output=True, text=True)
+
+        # Log the result
+        if result.returncode == 0:
+            print(f"Successfully updated website with progress for VOD {vod_id}.")
+        else:
+            print(f"Failed to update website for VOD {vod_id}: {result.stderr}")
+    except Exception as e:
+        print(f"An error occurred while updating the website for VOD {vod_id}: {e}")
+
+# Function to get the current elapsed time
+def get_elapsed_time():
+    return elapsed_time
+
+# Stop the timer thread gracefully when the script exits
+def stop_timer():
+    global timer_running
+    timer_running = False
+    timer.join()
+
 # Singleton Whisper model instance
 _model_instance = None
 
@@ -44,8 +118,8 @@ def get_whisper_model():
         _model_instance = WhisperModel("distil-large-v3", device="cuda", compute_type="float32")
     return _model_instance
 
-# Function to clean and normalize Twitch URLs
 def clean_url(url):
+    """Function to clean and normalize Twitch URLs."""
     if url:
         url = url.replace("m.twitch.tv", "twitch.tv")
         url = url.replace("?desktop-redirect=true", "")
@@ -53,8 +127,8 @@ def clean_url(url):
             url = url[:-1]
     return url
 
-# Function to get pages from a category on Fandom
 def get_category_pages(category_url):
+    """Function to get pages from a category on Fandom."""
     pages = []
     next_page = category_url
 
@@ -169,7 +243,7 @@ def preload_cudnn_dlls(cuda_bin_path):
 
 def transcribe(audio_file, device="cuda", output_dir=None):
     """
-    Transcribes an audio file using the faster-whisper library.
+    Transcribes an audio file using the faster-whisper library with timing.
 
     Args:
         audio_file (str): Path to the audio file to transcribe.
@@ -190,12 +264,17 @@ def transcribe(audio_file, device="cuda", output_dir=None):
     formatted_output_file = os.path.join(output_dir, f"formatted_{file_basename}_transcription.txt")
     raw_output_file = os.path.join(output_dir, f"{file_basename}_raw_transcript.txt")
 
+    # Record start time
+    transcription_start_time = get_elapsed_time()
     print("Beginning transcription...")
-    start_time = time.time()
-    # Convert segments generator to a list
     segments, info = model.transcribe(audio_file, beam_size=5, language="en")
-    segments = list(segments)  # Convert generator to a list
+    segments = list(segments)  # Ensure segments can be iterated over multiple times
     print("Transcription completed.")
+    transcription_end_time = get_elapsed_time()
+
+    # Calculate task duration
+    task_duration = transcription_end_time - transcription_start_time
+    print(f"Transcription time: {task_duration:.2f} seconds")
 
     # New logic for the formatted transcript
     print(f"\nDetected language: {info.language} (probability: {info.language_probability:.6f})\n")
@@ -250,7 +329,7 @@ def transcribe(audio_file, device="cuda", output_dir=None):
         print(f"Error while writing raw transcription: {e}")
         raise
 
-    total_elapsed_time = time.time() - start_time
+    total_elapsed_time = time() - transcription_start_time
     audio_duration_seconds = info.duration
     total_words = sum(len(segment.text.split()) for segment in segments)
     transcription_seconds_per_audio_second = total_elapsed_time / audio_duration_seconds
@@ -263,8 +342,6 @@ def transcribe(audio_file, device="cuda", output_dir=None):
     print(f"Transcription seconds per audio second: {transcription_seconds_per_audio_second:.2f}")
 
     return formatted_output_file, raw_output_file
-
-
 
 def calculate_vod(mp4_duration):
     """
@@ -619,12 +696,17 @@ def download_twitch_vod_and_chat(vod, delete_mp3_after_processing=False):
         print(f"Transcribing MP3 for {title} from {mp3_dest_path}...")
         tpath1, tpath2 = transcribe(mp3_dest_path, "cuda", output_dir=vod_folder)
 
+        # Update the website after transcription
+        update_website_with_progress(vod_id)
+
         print(f"Successfully processed VOD: {title}")
         return True
 
     except Exception as e:
         print(f"An error occurred while processing VOD {title}: {e}")
         return False
+
+
 
 
 def move_transcription_files(source_dir, filenames, destination_dir):
@@ -690,85 +772,90 @@ if __name__ == "__main__":
     # Control variable to force loading VTubers and VODs from CSV
     FORCE_LOAD_FROM_CSV = True
 
-    print("Fetching VTuber pages from Fandom categories...")
-    twitch_category_pages = get_category_pages("https://virtualyoutuber.fandom.com/wiki/Category:Twitch")
-    english_category_pages = get_category_pages("https://virtualyoutuber.fandom.com/wiki/Category:English")
+    try:
+        print("Fetching VTuber pages from Fandom categories...")
+        twitch_category_pages = get_category_pages("https://virtualyoutuber.fandom.com/wiki/Category:Twitch")
+        english_category_pages = get_category_pages("https://virtualyoutuber.fandom.com/wiki/Category:English")
 
-    print("Loading verified VTubers from CSV if it exists...")
-    cached_vtubers = load_verified_vtubers()
-    verified_vtuber_pages = get_verified_vtubers(twitch_category_pages, english_category_pages)
+        print("Loading verified VTubers from CSV if it exists...")
+        cached_vtubers = load_verified_vtubers()
+        verified_vtuber_pages = get_verified_vtubers(twitch_category_pages, english_category_pages)
 
-    if FORCE_LOAD_FROM_CSV or set(cached_vtubers) == set(verified_vtuber_pages):
-        print("Forced loading from CSV or cached VTuber list matches. Loading valid VODs from CSV...")
-        all_vods = load_vods()
-    else:
-        print("Cached VTuber list does not match. Fetching new VODs...")
-        save_verified_vtubers(verified_vtuber_pages)
+        if FORCE_LOAD_FROM_CSV or set(cached_vtubers) == set(verified_vtuber_pages):
+            print("Forced loading from CSV or cached VTuber list matches. Loading valid VODs from CSV...")
+            all_vods = load_vods()
+        else:
+            print("Cached VTuber list does not match. Fetching new VODs...")
+            save_verified_vtubers(verified_vtuber_pages)
 
-        verified_vtuber_pages.sort(key=lambda url: url.split("/")[-1].lower())
+            verified_vtuber_pages.sort(key=lambda url: url.split("/")[-1].lower())
 
-        twitch_links = []
-        vtuber_to_page = {}
-        for vtuber_page in verified_vtuber_pages:
-            twitch_link = extract_twitch_link(vtuber_page)
-            if twitch_link:
-                twitch_links.append(twitch_link)
-                vtuber_to_page[twitch_link.split("/")[-1]] = vtuber_page
+            twitch_links = []
+            vtuber_to_page = {}
+            for vtuber_page in verified_vtuber_pages:
+                twitch_link = extract_twitch_link(vtuber_page)
+                if twitch_link:
+                    twitch_links.append(twitch_link)
+                    vtuber_to_page[twitch_link.split("/")[-1]] = vtuber_page
 
-        blacklist = {
-            "hika",
-            "Rubius",
-            "mikupinku",
-            "yadidoll",
-            "lupomarcio",
-            "Vinesauce",
-            "DougDoug",
-            "Tectone"
-        }
-        twitch_links = filter_blacklist(twitch_links, blacklist)
-        all_vods = []
+            blacklist = {
+                "hika",
+                "Rubius",
+                "mikupinku",
+                "yadidoll",
+                "lupomarcio",
+                "Vinesauce",
+                "DougDoug",
+                "Tectone"
+            }
+            twitch_links = filter_blacklist(twitch_links, blacklist)
+            all_vods = []
 
-        for link in twitch_links:
-            try:
-                channel_name = link.split("/")[-1]
-                user_id = get_user_id(channel_name, client_id, access_token)
-                vods = get_recent_vods(user_id, client_id, access_token)
-                valid_vods = [vod for vod in vods if is_valid(vod, client_id, access_token)]
-                if valid_vods:
-                    all_vods.extend(valid_vods)
-                    download_vtuber_wiki_page(channel_name, vtuber_to_page[channel_name])
-            except Exception as e:
-                print(f"Failed to fetch VODs for {link}: {e}")
+            for link in twitch_links:
+                try:
+                    channel_name = link.split("/")[-1]
+                    user_id = get_user_id(channel_name, client_id, access_token)
+                    vods = get_recent_vods(user_id, client_id, access_token)
+                    valid_vods = [vod for vod in vods if is_valid(vod, client_id, access_token)]
+                    if valid_vods:
+                        all_vods.extend(valid_vods)
+                        download_vtuber_wiki_page(channel_name, vtuber_to_page[channel_name])
+                except Exception as e:
+                    print(f"Failed to fetch VODs for {link}: {e}")
 
-        save_vods(all_vods)
+            save_vods(all_vods)
 
-    print(f"Total valid VODs to process: {len(all_vods)}")
-    total_duration_seconds = sum(vod['duration_seconds'] for vod in all_vods)
-    formatted_total_duration = format_duration(total_duration_seconds)
-    print(f"Collected {len(all_vods)} valid VODs, Totaling {formatted_total_duration} of audio.")
+        print(f"Total valid VODs to process: {len(all_vods)}")
+        total_duration_seconds = sum(vod['duration_seconds'] for vod in all_vods)
+        formatted_total_duration = format_duration(total_duration_seconds)
+        print(f"Collected {len(all_vods)} valid VODs, Totaling {formatted_total_duration} of audio.")
 
-    vod_durations = [vod['duration_seconds'] for vod in all_vods]
-    estimated_time_for_all_vods_seconds = calculate_vods(vod_durations)
-    estimated_time_for_all_vods = format_duration(float(estimated_time_for_all_vods_seconds))
-    print(f"\nEstimated total time to process all VODs: {estimated_time_for_all_vods}")
+        vod_durations = [vod['duration_seconds'] for vod in all_vods]
+        estimated_time_for_all_vods_seconds = calculate_vods(vod_durations)
+        estimated_time_for_all_vods = format_duration(float(estimated_time_for_all_vods_seconds))
+        print(f"\nEstimated total time to process all VODs: {estimated_time_for_all_vods}")
 
-    print(f"Starting processing for the first 3 VODs.")
+        print(f"Starting processing for the first 3 VODs.")
 
-    # Process the first three VODs explicitly
-    if len(all_vods) < 3:
-        print("Not enough VODs to process (less than 3). Exiting.")
-    else:
-        vod1, vod2, vod3 = all_vods[:3]
+        # Process the first three VODs explicitly
+        if len(all_vods) < 3:
+            print("Not enough VODs to process (less than 3). Exiting.")
+        else:
+            vod1, vod2, vod3 = all_vods[:3]
 
-        for idx, vod in enumerate([vod1, vod2, vod3], start=1):
-            print(f"\nProcessing VOD {idx}: {vod['title']} ({vod['url']})")
-            try:
-                success = download_twitch_vod_and_chat(vod, delete_mp3_after_processing=False)
-                if success:
-                    print(f"Successfully processed VOD {idx}: {vod['title']}")
-                else:
-                    print(f"Failed to process VOD {idx}: {vod['title']}")
-            except Exception as e:
-                print(f"Unexpected error during VOD {idx} processing: {e}")
+            for idx, vod in enumerate([vod1, vod2, vod3], start=1):
+                print(f"\nProcessing VOD {idx}: {vod['title']} ({vod['url']})")
+                try:
+                    success = download_twitch_vod_and_chat(vod, delete_mp3_after_processing=False)
+                    if success:
+                        print(f"Successfully processed VOD {idx}: {vod['title']}")
+                    else:
+                        print(f"Failed to process VOD {idx}: {vod['title']}")
+                except Exception as e:
+                    print(f"Unexpected error during VOD {idx} processing: {e}")
 
-    print("All selected VODs have been processed and transcribed.")
+        print("All selected VODs have been processed and transcribed.")
+
+    finally:
+        # Ensure the timer thread stops on exit
+        stop_timer()
