@@ -574,12 +574,16 @@ def is_valid(vod, client_id, access_token):
 
 # Function to save verified VTubers to CSV
 def save_verified_vtubers(vtubers):
+    # Ensure the directory exists
+    os.makedirs(BASE_TRANSCRIPTS_FOLDER, exist_ok=True)
+
     with open(VTUBERS_CSV, 'w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
         writer.writerow(["VTuber Page"])
         for vtuber in vtubers:
             writer.writerow([vtuber])
     print(f"Saved {len(vtubers)} verified VTubers to {VTUBERS_CSV}")
+
 
 
 # Function to load verified VTubers from CSV
@@ -770,7 +774,7 @@ def move_transcription_files(source_dir, filenames, destination_dir):
 # Main script
 if __name__ == "__main__":
     # Control variable to force loading VTubers and VODs from CSV
-    FORCE_LOAD_FROM_CSV = True
+    FORCE_LOAD_FROM_CSV = False
 
     try:
         print("Fetching VTuber pages from Fandom categories...")
@@ -835,26 +839,21 @@ if __name__ == "__main__":
         estimated_time_for_all_vods = format_duration(float(estimated_time_for_all_vods_seconds))
         print(f"\nEstimated total time to process all VODs: {estimated_time_for_all_vods}")
 
-        print(f"Starting processing for the first 3 VODs.")
+        print(f"Starting processing for all valid VODs...")
 
-        # Process the first three VODs explicitly
-        if len(all_vods) < 3:
-            print("Not enough VODs to process (less than 3). Exiting.")
-        else:
-            vod1, vod2, vod3 = all_vods[:3]
+        # Process all VODs in the list
+        for idx, vod in enumerate(all_vods, start=1):
+            print(f"\nProcessing VOD {idx} of {len(all_vods)}: {vod['title']} ({vod['url']})")
+            try:
+                success = download_twitch_vod_and_chat(vod, delete_mp3_after_processing=False)
+                if success:
+                    print(f"Successfully processed VOD {idx}: {vod['title']}")
+                else:
+                    print(f"Failed to process VOD {idx}: {vod['title']}")
+            except Exception as e:
+                print(f"Unexpected error during VOD {idx} processing: {e}")
 
-            for idx, vod in enumerate([vod1, vod2, vod3], start=1):
-                print(f"\nProcessing VOD {idx}: {vod['title']} ({vod['url']})")
-                try:
-                    success = download_twitch_vod_and_chat(vod, delete_mp3_after_processing=False)
-                    if success:
-                        print(f"Successfully processed VOD {idx}: {vod['title']}")
-                    else:
-                        print(f"Failed to process VOD {idx}: {vod['title']}")
-                except Exception as e:
-                    print(f"Unexpected error during VOD {idx} processing: {e}")
-
-        print("All selected VODs have been processed and transcribed.")
+        print("All valid VODs have been processed and transcribed.")
 
     finally:
         # Ensure the timer thread stops on exit
