@@ -50,12 +50,13 @@ def timer_thread():
 timer = threading.Thread(target=timer_thread, daemon=True)
 timer.start()
 
-def update_website_with_progress(vod_id):
+def update_website_with_progress(vod_id, status):
     """
     Updates the website with transcription progress via a JSON payload.
 
     Args:
         vod_id (str): The ID of the VOD being processed.
+        status (str): The current status of the process.
     """
     try:
         # Find the VOD in the list
@@ -65,26 +66,27 @@ def update_website_with_progress(vod_id):
             return
 
         vod = all_vods[vod_index]
-        vod_num_in_list = vod_index + 1
+        vod_num_in_list = vod_index + 1 + progress_data.get("stage_fraction", 0)
         vods_left = len(all_vods) - vod_num_in_list
         vod_duration_seconds = vod['duration_seconds']
-        total_audio_left_seconds = sum(v['duration_seconds'] for v in all_vods[vod_num_in_list:])
+        total_audio_left_seconds = sum(v['duration_seconds'] for v in all_vods[int(vod_num_in_list):])
 
         # Prepare the JSON payload
         update_payload = {
             "vod_id": vod_id,
-            "vod_num_in_list": vod_num_in_list,
-            "vods_left_to_process": vods_left,
+            "completed_vods": min(vod_num_in_list, len(all_vods)),
+            "total_vods": len(all_vods),
             "vod_duration": format_duration(vod_duration_seconds),
             "total_audio_left": format_duration(total_audio_left_seconds),
+            "status": status
         }
 
-        print(f"Sending progress update to the website for VOD {vod_id}...")
+        print(f"Sending progress update to the website for VOD {vod_id} with status '{status}'...")
         # Use curl to send the update
         curl_command = [
-            "curl", "-X", "POST", "http://localhost:7696/update_text",
+            "curl", "-X", "POST", "http://localhost:5000/update_progress",
             "-H", "Content-Type: application/json",
-            "-d", json.dumps({"text": json.dumps(update_payload)})
+            "-d", json.dumps(update_payload)
         ]
         result = subprocess.run(curl_command, capture_output=True, text=True)
 
@@ -648,11 +650,14 @@ def download_twitch_vod_and_chat(vod, delete_mp3_after_processing=False):
     try:
         # Download the VOD
         print(f"Downloading VOD for {title}...")
+        update_website_with_progress(vod_id, "start_download")
         subprocess.run([
             "TwitchDownloaderCLI.exe", "videodownload",
             "--id", vod_id,
             "-o", vod_filename
         ], check=True)
+        update_website_with_progress(vod_id, "finish_download")
+
 
         # Download the chat
         print(f"Downloading chat for {title}...")
@@ -662,12 +667,15 @@ def download_twitch_vod_and_chat(vod, delete_mp3_after_processing=False):
             "-o", chat_json_filename
         ], check=True)
 
+
+        update_website_with_progress(vod_id, "start_mp3_conver")
         # Convert VOD to MP3
         print(f"Converting VOD to MP3 for {title}...")
         subprocess.run([
             "ffmpeg", "-i", vod_filename, "-q:a", "0", "-map", "a", mp3_filename
         ], check=True)
         os.remove(vod_filename)  # Delete MP4 after conversion
+        update_website_with_progress(vod_id, "finish_mp3_conver")
 
         # Move chat JSON file to VOD folder
         shutil.move(chat_json_filename, os.path.join(vod_folder, chat_json_filename))
@@ -698,10 +706,11 @@ def download_twitch_vod_and_chat(vod, delete_mp3_after_processing=False):
 
         # Transcribe the MP3 file from its new location
         print(f"Transcribing MP3 for {title} from {mp3_dest_path}...")
+        update_website_with_progress(vod_id, "start_transcribe")
         tpath1, tpath2 = transcribe(mp3_dest_path, "cuda", output_dir=vod_folder)
 
         # Update the website after transcription
-        update_website_with_progress(vod_id)
+        update_website_with_progress(vod_id, "finish_transcribe")
 
         print(f"Successfully processed VOD: {title}")
         return True
